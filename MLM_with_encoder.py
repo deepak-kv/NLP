@@ -6,8 +6,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from transformers import BertTokenizer
-import random
-
+import random, sys
+sys.path.append('/Users/deepak/github/NLP')
+from utils.helper import CustomTokenizer, Vocabulary
 
 #======================================================================
 #                       Multi-Head-Attention
@@ -115,54 +116,6 @@ class TransformerEncoder(nn.Module):
 #                   Mask Language Model (MLM)
 #======================================================================
 
-
-
-# Load BERT tokenizer
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-
-# Small synthetic dataset
-sentences = [
-    "The cat sat on the mat.",
-    "The sun is shining brightly.",
-    "I love deep learning and NLP.",
-    "Transformers have changed AI research.",
-    "PyTorch makes deep learning easier."
-]
-
-# Tokenize sentences and apply masking
-def mask_tokens(sentence, mask_prob=0.15):
-    tokens = tokenizer.tokenize(sentence)
-    token_ids = tokenizer.convert_tokens_to_ids(tokens)
-    
-    masked_tokens = []
-    labels = []
-    for token in token_ids:
-        if random.random() < mask_prob:
-            masked_tokens.append(tokenizer.mask_token_id)  # Replace with [MASK]
-            labels.append(token)  # Save original token for loss computation
-        else:
-            masked_tokens.append(token)
-            labels.append(-100)  # Ignore in loss
-    
-    return masked_tokens, labels
-
-# Prepare dataset
-input_ids = []
-labels = []
-for sentence in sentences:
-    masked_input, label = mask_tokens(sentence)
-    input_ids.append(masked_input)
-    labels.append(label)
-
-# Pad sequences to the maximum length in the batch
-max_len = max(len(masked) for masked in input_ids)
-input_ids = [seq + [tokenizer.pad_token_id] * (max_len - len(seq)) for seq in input_ids]
-labels = [seq + [-100] * (max_len - len(seq)) for seq in labels]
-
-input_ids = torch.tensor(input_ids, dtype=torch.long)
-labels = torch.tensor(labels, dtype=torch.long)
-
-
 # Define simple MLM model (using a TransformerEncoder)
 class SimpleMLM(nn.Module):
     def __init__(self, vocab_size, hidden_dim=256, num_heads=4, num_layers=2, max_length=128):
@@ -175,8 +128,44 @@ class SimpleMLM(nn.Module):
         return self.fc(x)  # Predict next token
 
 
+
+# Small synthetic dataset
+sentences = [
+    "Everyone knpws that God is great",
+    "Whole universe is created by the God",
+    "The name of God is Narayan Hari",
+    "God helps everyone when they suffer", 
+    "We should love God",
+    "The sun is shining brightly.",
+    "I love Narayan Hari.",
+    "Joy comes from God",
+    "We should not do bad karma",
+    "We should always do good karma",
+    "Narayan Hari likes the people who do good karma"
+]
+
+# Initialize tokenizer and vocabulary
+tokenizer = CustomTokenizer()
+vocab = Vocabulary(tokenizer)
+
+vocab.build_vocab(sentences)
+
+# Define the desired sequence length
+seq_length = 10  # Example sequence length
+
+# Get token IDs and labels for the sentences in the shape (seq_length, num_sentences)
+# Enable masking by setting masking=True
+masked_token_ids, labels = vocab.get_token_ids(sentences, seq_length, masking=True, mask_prob=0.15)
+
+# Convert to PyTorch tensors
+token_ids_tensor = torch.tensor(masked_token_ids, dtype=torch.long)
+labels = torch.tensor(labels, dtype=torch.long)
+# print (masked_token_ids_tensor)
+# print (labels_tensor)
+
+
+vocab_size = len(vocab.word2idx)
 # Initialize model
-vocab_size = tokenizer.vocab_size
 model = SimpleMLM(vocab_size)
 
 # Training setup
@@ -184,10 +173,12 @@ criterion = nn.CrossEntropyLoss(ignore_index=-100)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 # Training loop
-num_epochs = 5
+num_epochs = 500
 for epoch in range(num_epochs):
     optimizer.zero_grad()
-    output = model(input_ids)
+    output = model(token_ids_tensor)
+    # print (f"output.view(-1, vocab_size) : {output.view(-1, vocab_size)}")
+    # print (f"labels.view(-1) : {labels.view(-1)}")
     loss = criterion(output.view(-1, vocab_size), labels.view(-1))
     loss.backward()
     optimizer.step()
@@ -195,11 +186,41 @@ for epoch in range(num_epochs):
 
 # Test prediction (fill in masked words)
 with torch.no_grad():
-    test_output = model(input_ids)
+    test_output = model(token_ids_tensor)
     predicted_ids = test_output.argmax(dim=-1)
-    predicted_tokens = [tokenizer.convert_ids_to_tokens(ids.tolist()) for ids in predicted_ids]
-    
+    print (f"predicted_ids : {predicted_ids}")
+    predicted_tokens = [vocab.convert_ids_to_tokens(ids.tolist()) for ids in predicted_ids]
+    print (predicted_tokens)
     print("\nPredicted sentences:")
     for i, tokens in enumerate(predicted_tokens):
         print(" ".join(tokens))
 
+
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+import torch
+
+# Extract embeddings
+word_embeddings = model.encoder.embedding.weight.data.cpu().numpy()
+
+# Reduce dimensionality to 2D
+pca = PCA(n_components=2)
+embeddings_2d = pca.fit_transform(word_embeddings)
+
+# idx2word
+# Select a subset of words to label (e.g., first 100 words)
+num_words_to_label = 20
+indices = list(range(2,num_words_to_label))  # Select first 100 words
+
+plt.figure(figsize=(12, 10))
+plt.scatter(embeddings_2d[:num_words_to_label, 0], embeddings_2d[:num_words_to_label, 1], alpha=0.5)
+
+# Annotate selected words
+for i in indices:
+    word = vocab.idx2word.get(i, f"ID-{i}")  # Get word or fallback to ID
+    plt.annotate(word, (embeddings_2d[i, 0], embeddings_2d[i, 1]), fontsize=10)
+
+plt.title("Word Embeddings Visualization using PCA")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.show()

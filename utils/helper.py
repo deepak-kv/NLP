@@ -1,3 +1,5 @@
+import re
+import random
 import numpy as np
 import torch
 from collections import defaultdict
@@ -15,11 +17,12 @@ class CustomTokenizer:
         return tokens
 
 class Vocabulary:
-    def __init__(self):
-        # Reserve index 0 for <UNK>
-        self.word2idx = {'<UNK>': 0}  # Initialize with <UNK> token
-        self.idx2word = {0: '<UNK>'}  # Reverse mapping
-        self.next_idx = 1  # Start assigning IDs from 1
+    def __init__(self, tokenizer):
+        # Reserve index 0 for <UNK> and index 1 for [MASK]
+        self.word2idx = {'<UNK>': 0, '[MASK]': 1}  # Initialize with special tokens
+        self.idx2word = {0: '<UNK>', 1: '[MASK]'}  # Reverse mapping
+        self.next_idx = 2  # Start assigning IDs from 2
+        self.tokenizer = tokenizer  # Link the tokenizer to the vocabulary
 
     def add_word(self, word):
         """
@@ -35,61 +38,98 @@ class Vocabulary:
         Builds the vocabulary from a list of sentences.
         """
         for sentence in sentences:
-            tokens = tokenizer.tokenize(sentence)
+            tokens = self.tokenizer.tokenize(sentence)  # Use the linked tokenizer
             for token in tokens:
                 self.add_word(token)
 
-    def get_token_ids(self, sentences, seq_length):
+    def get_token_ids(self, sentences, seq_length, masking=False, mask_prob=0.15):
         """
         Converts a list of sentences into token IDs using the vocabulary.
         Pads or truncates each sentence to ensure a fixed sequence length.
-        Uses 0 (<UNK>) for out-of-vocabulary tokens.
+        If masking is True, randomly masks tokens according to mask_prob.
+        Returns:
+            - masked_token_ids: Token IDs with some tokens replaced by [MASK].
+            - labels: Original token IDs for masked positions, -100 for non-masked positions.
         """
         token_ids = []
+        labels = []
         for sentence in sentences:
-            tokens = tokenizer.tokenize(sentence)
+            tokens = self.tokenizer.tokenize(sentence)  # Use the linked tokenizer
             ids = [self.word2idx.get(token, 0) for token in tokens]  # Use 0 for unknown tokens
-            # Pad or truncate the sequence to the specified seq_length
-            if len(ids) < seq_length:
-                ids += [0] * (seq_length - len(ids))  # Pad with 0 (<UNK>)
+
+            # Apply masking if enabled
+            if masking:
+                masked_ids, label_ids = self._apply_masking(ids, mask_prob)
             else:
-                ids = ids[:seq_length]  # Truncate to seq_length
-            token_ids.append(ids)
-        return np.array(token_ids).T  # Transpose to get shape (seq_length, num_sentences)
+                masked_ids, label_ids = ids, [-100] * len(ids)
 
+            # Pad or truncate the sequence to the specified seq_length
+            if len(masked_ids) < seq_length:
+                masked_ids += [0] * (seq_length - len(masked_ids))  # Pad with 0 (<UNK>)
+                label_ids += [-100] * (seq_length - len(label_ids))  # Pad labels with -100
+            else:
+                masked_ids = masked_ids[:seq_length]  # Truncate to seq_length
+                label_ids = label_ids[:seq_length]  # Truncate labels
 
+            token_ids.append(masked_ids)
+            labels.append(label_ids)
 
+        return np.array(token_ids), np.array(labels)
 
+    def _apply_masking(self, token_ids, mask_prob):
+        """
+        Randomly masks tokens in the input sequence according to mask_prob.
+        Replaces masked tokens with:
+        - [MASK] token (80% of the time),
+        - A random token (10% of the time),
+        - The original token (10% of the time).
+        Returns:
+            - masked_tokens: Token IDs with some tokens replaced.
+            - labels: Original token IDs for masked positions, -100 for non-masked positions.
+        """
+        masked_tokens = []
+        labels = []
+        for token in token_ids:
+            if random.random() < mask_prob:  # Mask this token
+                rand = random.random()
+                if rand < 0.8:  # 80% chance: replace with [MASK]
+                    masked_tokens.append(self.word2idx['[MASK]'])
+                elif rand < 0.9:  # 10% chance: replace with a random token
+                    masked_tokens.append(random.choice(list(self.word2idx.values())))
+                else:  # 10% chance: keep the original token
+                    masked_tokens.append(token)
+                labels.append(token)  # Save original token for loss computation
+            else:  # Do not mask this token
+                masked_tokens.append(token)
+                labels.append(-100)  # Ignore in loss
 
-# Input sentences
-#sentences = [
-#    'Everyone else in the building was outside, frightened and confused',
-#    ' They were using the screens and lights on their mobile phones to see better',
-#    ' Several people got in their cars and turned on the lights',
-#    ' They drove to the entrance to make a small area of light for everybody to stand together',
-#    'The street lights turned on, but most people were still afraid',
-#    ' '
-#]
+        return masked_tokens, labels
 
-'''
-# Initialize tokenizer and vocabulary
-tokenizer = CustomTokenizer()
-vocab = Vocabulary()
+    def convert_ids_to_tokens(self, ids):
+        """
+        Converts a list of token IDs to their corresponding tokens.
+        Args:
+            ids: List of token IDs.
+        Returns:
+            List of tokens.
+        """
+        return [self.idx2word.get(idx, '<UNK>') for idx in ids]
 
-# Build the vocabulary
-vocab.build_vocab(sentences)
+# Example usage (for testing the module)
+if __name__ == "__main__":
+    sentences = [
+        'Everyone else in the building was outside, frightened and confused',
+        ' They were using the screens and lights on their mobile phones to see better',
+        ' Several people got in their cars and turned on the lights',
+        ' They drove to the entrance to make a small area of light for everybody to stand together',
+        'The street lights turned on, but most people were still afraid',
+        ' '
+    ]
 
-# Define the desired sequence length
-seq_length = 15  # Example sequence length
+    #tokenizer = CustomTokenizer()
+    #vocab = Vocabulary(tokenizer)  # Pass the tokenizer to the Vocabulary
 
-# Get token IDs for the sentences in the shape (seq_length, num_sentences)
-token_ids = vocab.get_token_ids(sentences, seq_length)
-vocab_size = len(vocab.word2idx)
-token_ids_tensor = torch.tensor(token_ids, dtype=torch.long)
+    # Build the vocabulary
+    #vocab.build_vocab(sentences)
 
-# Print the results
-print("Vocabulary:")
-print(vocab.word2idx)
-print("\nToken IDs (shape: (seq_length, num_sentences)):")
-print(token_ids)
-'''
+    # Define the desired
